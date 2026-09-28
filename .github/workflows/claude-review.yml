@@ -82,7 +82,7 @@ jobs:
           prompt: ${{ steps.build-prompt.outputs.prompt }}
           claude_args: |
             --model claude-sonnet-5
-            --max-turns 40
+            --max-turns 100
             --allowedTools "Read,Glob,Grep,Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
 
       - name: Post factory usage report
@@ -224,7 +224,7 @@ jobs:
           prompt: ${{ steps.build-fix-prompt.outputs.prompt }}
           claude_args: |
             --model claude-sonnet-5
-            --max-turns 80
+            --max-turns 150
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(pytest:*),Bash(python:*),Bash(npm:*),Bash(npx:*),Bash(make:*),Bash(cargo:*),Bash(go test:*),Bash(go:*)"
 
       - name: Salvage partial fix pass work

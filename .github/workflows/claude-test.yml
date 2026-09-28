@@ -94,7 +94,7 @@ jobs:
           prompt: ${{ steps.build-prompt.outputs.prompt }}
           claude_args: |
             --model claude-sonnet-5
-            --max-turns 10
+            --max-turns 20
             --allowedTools "Bash(gh pr comment:*)"
 
       - name: Fallback comment if Claude did not post the marker
