@@ -1,0 +1,117 @@
+name: Claude test
+
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: claude-test-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  test:
+    # Fires on the per-ticket release/<n>-slug -> main PR (FACTORY_RELEASE_MODE=per-ticket).
+    if: >
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'agent-test' &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.FACTORY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Checkout ASD factory
+        uses: actions/checkout@v4
+        with:
+          repository: aholam1524/ASD
+          ref: ${{ vars.ASD_FACTORY_REF || 'main' }}
+          path: .asd-factory
+          token: ${{ secrets.FACTORY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Log ASD factory version
+        run: |
+          echo "ASD factory ref: ${{ vars.ASD_FACTORY_REF || 'main' }}"
+          git -C .asd-factory rev-parse HEAD
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the test suite
+        id: run_tests
+        run: |
+          set -o pipefail
+          if bash .asd-factory/factory/run_ci.sh 2>&1 | tee /tmp/ci-output.txt; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=fail" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build test prompt
+        id: build-prompt
+        env:
+          RESULT: ${{ steps.run_tests.outputs.result }}
+        run: |
+          MARKER="<!-- factory:test-result:pass -->"
+          if [[ "$RESULT" == "fail" ]]; then
+            MARKER="<!-- factory:test-result:fail -->"
+          fi
+          {
+            cat .asd-factory/factory/prompts/test.md
+            printf '\n\n## Unattended CI notes\n\n'
+            printf 'You are running as an unattended CI job. The test command has already run **outside of you** and the result is final: **%s** — you cannot change it, and must not re-run the tests or edit any files.\n\n' "$RESULT"
+            printf 'Read the CI output below, then post exactly one comment on this PR (`gh pr comment %s --body "..."`) with a short summary of what ran and, if it failed, the most likely cause. The **last line** of that comment must be exactly:\n%s\n\n' "$PR_NUMBER" "$MARKER"
+            printf '## CI output\n\n```\n'
+            tail -c 4000 /tmp/ci-output.txt
+            printf '\n```\n'
+          } > /tmp/test-prompt.md
+          delimiter="$(openssl rand -hex 16)"
+          {
+            echo "prompt<<${delimiter}"
+            cat /tmp/test-prompt.md
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude test summary
+        id: claude_test
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.FACTORY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          prompt: ${{ steps.build-prompt.outputs.prompt }}
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 10
+            --allowedTools "Bash(gh pr comment:*)"
+
+      - name: Fallback comment if Claude did not post the marker
+        if: always()
+        run: |
+          set -euo pipefail
+          MARKER="<!-- factory:test-result:pass -->"
+          if [[ "${{ steps.run_tests.outputs.result }}" == "fail" ]]; then
+            MARKER="<!-- factory:test-result:fail -->"
+          fi
+          COMMENTS="$(gh pr view "$PR_NUMBER" --json comments --jq '.comments[].body')"
+          if grep -Fq "$MARKER" <<< "$COMMENTS"; then
+            echo "Marker already posted; skipping fallback comment."
+            exit 0
+          fi
+          {
+            printf 'Test agent result: **%s** (posted by the factory; Claude did not post its own summary).\n\n' "${{ steps.run_tests.outputs.result }}"
+            printf '%s\n' "$MARKER"
+          } > /tmp/fallback-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/fallback-comment.md

@@ -1,0 +1,119 @@
+name: Claude dev
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: claude-dev-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  dev:
+    if: github.event.action == 'labeled' && github.event.label.name == 'agent-dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.FACTORY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: Record job start time
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.FACTORY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Checkout ASD factory
+        uses: actions/checkout@v4
+        with:
+          repository: aholam1524/ASD
+          ref: ${{ vars.ASD_FACTORY_REF || 'main' }}
+          path: .asd-factory
+          token: ${{ secrets.FACTORY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Log ASD factory version
+        run: |
+          echo "ASD factory ref: ${{ vars.ASD_FACTORY_REF || 'main' }}"
+          git -C .asd-factory rev-parse HEAD
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute feature branch name
+        id: branch
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          SLUG="$(printf '%s' "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | cut -c1-50 | sed -E 's/-+$//')"
+          [[ -z "$SLUG" ]] && SLUG=change
+          echo "name=feature/${ISSUE_NUMBER}-${SLUG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create feature branch from dev
+        run: git checkout -B "${{ steps.branch.outputs.name }}"
+
+      - name: Build dev prompt
+        id: build-prompt
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+        run: |
+          {
+            cat .asd-factory/factory/prompts/dev.md
+            printf '\n\n## Unattended CI notes\n\n'
+            printf 'You are running as an unattended CI job on branch `%s`, already created and checked out for you — do not create or switch branches, and do not run `gh` commands (no PR, no labels, no comments). When you are done editing, run:\n\n' "$BRANCH_NAME"
+            printf '```\n'
+            printf 'git add -A\n'
+            printf 'git commit -m "<short message>"\n'
+            printf 'git push -u origin %s\n' "$BRANCH_NAME"
+            printf '```\n\n'
+            printf 'The factory opens the pull request into `dev` for you after that push.\n'
+            printf '\n\n## Issue\n\n'
+            printf 'Number: %s\n' "$ISSUE_NUMBER"
+            printf 'Title: %s\n' "$ISSUE_TITLE"
+            printf 'URL: %s\n\n' "$ISSUE_URL"
+            printf '### Description\n\n%s\n' "$ISSUE_BODY"
+          } > /tmp/dev-prompt.md
+          delimiter="$(openssl rand -hex 16)"
+          {
+            echo "prompt<<${delimiter}"
+            cat /tmp/dev-prompt.md
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude dev pass
+        id: claude_dev
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.FACTORY_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          prompt: ${{ steps.build-prompt.outputs.prompt }}
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 80
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(pytest:*),Bash(python:*),Bash(npm:*),Bash(npx:*)"
+
+      - name: Verify the branch was pushed
+        run: |
+          set -euo pipefail
+          if ! git fetch origin "${{ steps.branch.outputs.name }}"; then
+            gh issue comment "$ISSUE_NUMBER" --body "Factory: the Claude dev pass did not push a \`${{ steps.branch.outputs.name }}\` branch. Add the \`agent-dev\` label again to retry."
+            exit 1
+          fi
