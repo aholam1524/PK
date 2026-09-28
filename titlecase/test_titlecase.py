@@ -15,3 +15,8 @@ def test_all_caps_string():
 
 def test_empty_string():
     assert titlecase("") == ""
+
+
+def test_preserves_whitespace():
+    assert titlecase("  hello   world  ") == "  Hello   World  "
+    assert titlecase("hello\tworld\nfoo") == "Hello\tWorld\nFoo"

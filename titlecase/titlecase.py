@@ -1,2 +1,5 @@
+import re
+
+
 def titlecase(text):
-    return " ".join(word.capitalize() for word in text.split())
+    return re.sub(r"\S+", lambda match: match.group().capitalize(), text)
